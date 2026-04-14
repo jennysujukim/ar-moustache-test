@@ -125,28 +125,29 @@
   const overlay = document.getElementById('overlay');
   const status  = document.getElementById('status');
 
-  // MediaPipe Face Mesh landmark indices
-  // Upper lip center area: 13 (upper lip top-center)
-  // Nose bottom: 2 (nose tip), 94 (nose bottom), 164 (under nose)
-  // Mouth corners: 61 (left), 291 (right)
-  // We'll place moustache between nose bottom (landmark 94) and upper lip (landmark 13)
-  // Width anchored on mouth corners 61 & 291
-
-  const NOSE_BOTTOM   = 94;   // bottom of the nose
-  const UPPER_LIP     = 13;   // top of upper lip
-  const MOUTH_LEFT    = 61;   // left mouth corner
-  const MOUTH_RIGHT   = 291;  // right mouth corner
-  const LEFT_NOSE     = 129;  // left ala of nose
-  const RIGHT_NOSE    = 358;  // right ala of nose
-  const PHILTRUM_L    = 92;
-  const PHILTRUM_R    = 322;
+  // Landmark indices
+  const NOSE_BOTTOM = 94;
+  const UPPER_LIP   = 13;
+  const MOUTH_LEFT  = 61;
+  const MOUTH_RIGHT = 291;
+  const LEFT_NOSE   = 129;
+  const RIGHT_NOSE  = 358;
 
   const moustacheImg = new Image();
   moustacheImg.src   = 'assets/moustache.png';
 
-  let modelReady  = false;
-  let faceVisible = false;
-  let lastFaces   = [];
+  let modelReady = false;
+
+  // ── EMA smoother ─────────────────────────────────────────────────────────────
+  // Prevents jitter by blending new values toward the previous smoothed value.
+  const SMOOTH = 0.35; // 0 = no smoothing, 1 = frozen
+  const smooth = {};
+
+  function ema(key, value) {
+    if (smooth[key] === undefined) smooth[key] = value;
+    smooth[key] = smooth[key] * SMOOTH + value * (1 - SMOOTH);
+    return smooth[key];
+  }
 
   // ── Face Mesh setup ──────────────────────────────────────────────────────────
   const faceMesh = new FaceMesh({
@@ -155,28 +156,43 @@
   });
 
   faceMesh.setOptions({
-    maxNumFaces:        1,
-    refineLandmarks:    true,
+    maxNumFaces:            1,
+    refineLandmarks:        true,
     minDetectionConfidence: 0.6,
     minTrackingConfidence:  0.6,
   });
 
+  // Draw happens HERE — in the results callback, not in a separate rAF loop.
+  // This avoids the race condition where canvas.width reset wipes an in-progress draw.
   faceMesh.onResults((results) => {
     if (!modelReady) {
       modelReady = true;
+      // Set canvas size once here, after the video dimensions are known
+      canvas.width  = video.videoWidth  || 640;
+      canvas.height = video.videoHeight || 480;
       overlay.classList.add('hidden');
       status.textContent = 'Position your face in the frame';
       status.classList.add('ready');
     }
 
-    lastFaces = results.multiFaceLandmarks || [];
-    faceVisible = lastFaces.length > 0;
+    const W = canvas.width;
+    const H = canvas.height;
 
-    if (faceVisible) {
-      status.textContent = 'Face detected — enjoy your moustache!';
-    } else {
+    ctx.clearRect(0, 0, W, H);
+
+    const faces = results.multiFaceLandmarks || [];
+
+    if (faces.length === 0) {
       status.textContent = 'No face detected — move closer';
       status.classList.remove('ready');
+      return;
+    }
+
+    status.textContent = 'Face detected — enjoy your moustache!';
+    status.classList.add('ready');
+
+    if (moustacheImg.complete && moustacheImg.naturalWidth > 0) {
+      drawMoustache(faces[0], W, H);
     }
   });
 
@@ -192,17 +208,12 @@
 
       const camera = new Camera(video, {
         onFrame: async () => {
-          canvas.width  = video.videoWidth  || 640;
-          canvas.height = video.videoHeight || 480;
           await faceMesh.send({ image: video });
         },
         width: 640,
         height: 480,
       });
       camera.start();
-
-      // Kick off render loop
-      requestAnimationFrame(renderLoop);
     } catch (err) {
       overlay.innerHTML = `
         <h2 style="color:#ff6b6b">Camera Access Denied</h2>
@@ -211,90 +222,58 @@
     }
   }
 
-  // ── Render loop ──────────────────────────────────────────────────────────────
-  function renderLoop() {
-    requestAnimationFrame(renderLoop);
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (!moustacheImg.complete || lastFaces.length === 0) return;
-
-    const W = canvas.width;
-    const H = canvas.height;
-
-    for (const landmarks of lastFaces) {
-      drawMoustache(landmarks, W, H);
-    }
-  }
-
-  function lm(landmarks, idx) {
-    const p = landmarks[idx];
-    return { x: p.x, y: p.y, z: p.z };
-  }
-
+  // ── Draw moustache ────────────────────────────────────────────────────────────
   function drawMoustache(landmarks, W, H) {
-    // ── Anchor points ───────────────────────────────────────────────────────
-    const noseBot  = lm(landmarks, NOSE_BOTTOM);
-    const upperLip = lm(landmarks, UPPER_LIP);
-    const mouthL   = lm(landmarks, MOUTH_LEFT);
-    const mouthR   = lm(landmarks, MOUTH_RIGHT);
-    const noseL    = lm(landmarks, LEFT_NOSE);
-    const noseR    = lm(landmarks, RIGHT_NOSE);
+    const p = (idx) => landmarks[idx];
 
-    // Center of the philtrum (between nose bottom and upper lip)
-    const cx = (noseBot.x + upperLip.x) / 2;
-    const cy = (noseBot.y + upperLip.y) / 2;
+    const noseBot  = p(NOSE_BOTTOM);
+    const upperLip = p(UPPER_LIP);
+    const mouthL   = p(MOUTH_LEFT);
+    const mouthR   = p(MOUTH_RIGHT);
+    const noseL    = p(LEFT_NOSE);
+    const noseR    = p(RIGHT_NOSE);
 
-    // Width: slightly wider than the distance between nose wings
-    const noseWidth = Math.hypot(
-      (noseR.x - noseL.x) * W,
-      (noseR.y - noseL.y) * H
-    );
-    const moustacheW = noseWidth * 2.4;
+    // Video is CSS-mirrored (scaleX -1). MediaPipe sees the original unmirrored
+    // frame. To align the canvas overlay with what the user sees, flip x:
+    //   canvasX = (1 - landmark.x) * W
+    const flip = (x) => 1 - x;
 
-    // Height proportional to width (preserve image aspect if possible)
-    const imgAspect = moustacheImg.naturalWidth && moustacheImg.naturalHeight
-      ? moustacheImg.naturalWidth / moustacheImg.naturalHeight
-      : 3.5;
-    const moustacheH = moustacheW / imgAspect;
+    // Center: midpoint between nose bottom and upper lip
+    const rawCx = (flip(noseBot.x) + flip(upperLip.x)) / 2;
+    const rawCy = (noseBot.y + upperLip.y) / 2;
 
-    // ── Head rotation ───────────────────────────────────────────────────────
-    // Roll angle: tilt of the mouth line
-    const dx = (mouthR.x - mouthL.x) * W;
-    const dy = (mouthR.y - mouthL.y) * H;
-    const roll = Math.atan2(dy, dx);
+    // Width from nose wing distance (mirrored, but the pixel distance is the same)
+    const noseWidthPx = Math.abs(flip(noseR.x) - flip(noseL.x)) * W;
+    const rawW = noseWidthPx * 2.4;
 
-    // ── Depth scale (z-axis perspective) ────────────────────────────────────
-    // MediaPipe z is relative; negative = closer. Scale near 1 for most faces.
-    const zScale = 1; // we rely on noseWidth adapting naturally
+    // Roll: mirroring flips the x-axis so the angle sign inverts
+    // Original angle: atan2(dy, dx) where dx = mouthR.x - mouthL.x
+    // After mirror:  atan2(dy, -dx)  →  negate the angle
+    const dx   = (mouthR.x - mouthL.x) * W;
+    const dy   = (mouthR.y - mouthL.y) * H;
+    const rawRoll = -Math.atan2(dy, dx);
 
-    // ── Draw with canvas transform ──────────────────────────────────────────
+    // Smooth all values to remove per-frame jitter
+    const cx   = ema('cx',   rawCx)   * W;
+    const cy   = ema('cy',   rawCy)   * H;
+    const mW   = ema('mW',   rawW);
+    const roll = ema('roll', rawRoll);
+
+    const imgAspect = moustacheImg.naturalWidth / moustacheImg.naturalHeight;
+    const mH = mW / imgAspect;
+
     ctx.save();
-
-    // Mirror compensation: video is CSS-mirrored, canvas must match
-    ctx.translate(W, 0);
-    ctx.scale(-1, 1);
-
-    ctx.translate(cx * W, cy * H);
+    ctx.translate(cx, cy);
     ctx.rotate(roll);
-
     ctx.globalAlpha = 0.95;
-    ctx.drawImage(
-      moustacheImg,
-      -moustacheW / 2,
-      -moustacheH / 2,
-      moustacheW,
-      moustacheH
-    );
-
+    ctx.drawImage(moustacheImg, -mW / 2, -mH / 2, mW, mH);
     ctx.restore();
   }
 
   // ── Boot ─────────────────────────────────────────────────────────────────────
-  moustacheImg.onload = startCamera;
+  moustacheImg.onload  = startCamera;
   moustacheImg.onerror = () => {
-    // If image fails, still start — we'll try to draw anyway
-    console.warn('Moustache image failed to load. Check assets/moustache.png');
+    console.warn('assets/moustache.png failed to load');
     startCamera();
   };
 </script>
