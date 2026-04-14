@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AR Moustache</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0a0a0a;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Segoe UI', sans-serif;
+      color: #fff;
+      overflow: hidden;
+    }
+
+    #app {
+      position: relative;
+      width: 640px;
+      height: 480px;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 0 60px rgba(255, 255, 255, 0.08);
+    }
+
+    #video {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+
+    #canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+    }
+
+    #status {
+      margin-top: 20px;
+      font-size: 14px;
+      color: rgba(255,255,255,0.5);
+      letter-spacing: 0.05em;
+      min-height: 20px;
+      transition: opacity 0.3s;
+    }
+
+    #status.ready {
+      color: rgba(100, 255, 150, 0.8);
+    }
+
+    #overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(0,0,0,0.85);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      z-index: 10;
+      border-radius: 16px;
+      transition: opacity 0.5s;
+    }
+
+    #overlay h2 {
+      font-size: 20px;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+      opacity: 0.9;
+    }
+
+    #overlay p {
+      font-size: 13px;
+      color: rgba(255,255,255,0.45);
+      text-align: center;
+      max-width: 280px;
+      line-height: 1.6;
+    }
+
+    .spinner {
+      width: 36px; height: 36px;
+      border: 2px solid rgba(255,255,255,0.1);
+      border-top-color: rgba(255,255,255,0.7);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .hidden { opacity: 0; pointer-events: none; }
+  </style>
+</head>
+<body>
+
+<div id="app">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+
+  <div id="overlay">
+    <div class="spinner"></div>
+    <h2>Loading AR Engine</h2>
+    <p>Setting up face tracking and moustache overlay…</p>
+  </div>
+</div>
+
+<div id="status">Initializing…</div>
+
+<!-- MediaPipe Face Mesh -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+
+<script>
+  const video   = document.getElementById('video');
+  const canvas  = document.getElementById('canvas');
+  const ctx     = canvas.getContext('2d');
+  const overlay = document.getElementById('overlay');
+  const status  = document.getElementById('status');
+
+  // MediaPipe Face Mesh landmark indices
+  // Upper lip center area: 13 (upper lip top-center)
+  // Nose bottom: 2 (nose tip), 94 (nose bottom), 164 (under nose)
+  // Mouth corners: 61 (left), 291 (right)
+  // We'll place moustache between nose bottom (landmark 94) and upper lip (landmark 13)
+  // Width anchored on mouth corners 61 & 291
+
+  const NOSE_BOTTOM   = 94;   // bottom of the nose
+  const UPPER_LIP     = 13;   // top of upper lip
+  const MOUTH_LEFT    = 61;   // left mouth corner
+  const MOUTH_RIGHT   = 291;  // right mouth corner
+  const LEFT_NOSE     = 129;  // left ala of nose
+  const RIGHT_NOSE    = 358;  // right ala of nose
+  const PHILTRUM_L    = 92;
+  const PHILTRUM_R    = 322;
+
+  const moustacheImg = new Image();
+  moustacheImg.src   = 'assets/moustache.png';
+
+  let modelReady  = false;
+  let faceVisible = false;
+  let lastFaces   = [];
+
+  // ── Face Mesh setup ──────────────────────────────────────────────────────────
+  const faceMesh = new FaceMesh({
+    locateFile: (file) =>
+      `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+  });
+
+  faceMesh.setOptions({
+    maxNumFaces:        1,
+    refineLandmarks:    true,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence:  0.6,
+  });
+
+  faceMesh.onResults((results) => {
+    if (!modelReady) {
+      modelReady = true;
+      overlay.classList.add('hidden');
+      status.textContent = 'Position your face in the frame';
+      status.classList.add('ready');
+    }
+
+    lastFaces = results.multiFaceLandmarks || [];
+    faceVisible = lastFaces.length > 0;
+
+    if (faceVisible) {
+      status.textContent = 'Face detected — enjoy your moustache!';
+    } else {
+      status.textContent = 'No face detected — move closer';
+      status.classList.remove('ready');
+    }
+  });
+
+  // ── Camera ───────────────────────────────────────────────────────────────────
+  async function startCamera() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480, facingMode: 'user' },
+        audio: false,
+      });
+      video.srcObject = stream;
+      await video.play();
+
+      const camera = new Camera(video, {
+        onFrame: async () => {
+          canvas.width  = video.videoWidth  || 640;
+          canvas.height = video.videoHeight || 480;
+          await faceMesh.send({ image: video });
+        },
+        width: 640,
+        height: 480,
+      });
+      camera.start();
+
+      // Kick off render loop
+      requestAnimationFrame(renderLoop);
+    } catch (err) {
+      overlay.innerHTML = `
+        <h2 style="color:#ff6b6b">Camera Access Denied</h2>
+        <p>${err.message}</p>
+        <p>Please allow camera permission and reload the page.</p>`;
+    }
+  }
+
+  // ── Render loop ──────────────────────────────────────────────────────────────
+  function renderLoop() {
+    requestAnimationFrame(renderLoop);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (!moustacheImg.complete || lastFaces.length === 0) return;
+
+    const W = canvas.width;
+    const H = canvas.height;
+
+    for (const landmarks of lastFaces) {
+      drawMoustache(landmarks, W, H);
+    }
+  }
+
+  function lm(landmarks, idx) {
+    const p = landmarks[idx];
+    return { x: p.x, y: p.y, z: p.z };
+  }
+
+  function drawMoustache(landmarks, W, H) {
+    // ── Anchor points ───────────────────────────────────────────────────────
+    const noseBot  = lm(landmarks, NOSE_BOTTOM);
+    const upperLip = lm(landmarks, UPPER_LIP);
+    const mouthL   = lm(landmarks, MOUTH_LEFT);
+    const mouthR   = lm(landmarks, MOUTH_RIGHT);
+    const noseL    = lm(landmarks, LEFT_NOSE);
+    const noseR    = lm(landmarks, RIGHT_NOSE);
+
+    // Center of the philtrum (between nose bottom and upper lip)
+    const cx = (noseBot.x + upperLip.x) / 2;
+    const cy = (noseBot.y + upperLip.y) / 2;
+
+    // Width: slightly wider than the distance between nose wings
+    const noseWidth = Math.hypot(
+      (noseR.x - noseL.x) * W,
+      (noseR.y - noseL.y) * H
+    );
+    const moustacheW = noseWidth * 2.4;
+
+    // Height proportional to width (preserve image aspect if possible)
+    const imgAspect = moustacheImg.naturalWidth && moustacheImg.naturalHeight
+      ? moustacheImg.naturalWidth / moustacheImg.naturalHeight
+      : 3.5;
+    const moustacheH = moustacheW / imgAspect;
+
+    // ── Head rotation ───────────────────────────────────────────────────────
+    // Roll angle: tilt of the mouth line
+    const dx = (mouthR.x - mouthL.x) * W;
+    const dy = (mouthR.y - mouthL.y) * H;
+    const roll = Math.atan2(dy, dx);
+
+    // ── Depth scale (z-axis perspective) ────────────────────────────────────
+    // MediaPipe z is relative; negative = closer. Scale near 1 for most faces.
+    const zScale = 1; // we rely on noseWidth adapting naturally
+
+    // ── Draw with canvas transform ──────────────────────────────────────────
+    ctx.save();
+
+    // Mirror compensation: video is CSS-mirrored, canvas must match
+    ctx.translate(W, 0);
+    ctx.scale(-1, 1);
+
+    ctx.translate(cx * W, cy * H);
+    ctx.rotate(roll);
+
+    ctx.globalAlpha = 0.95;
+    ctx.drawImage(
+      moustacheImg,
+      -moustacheW / 2,
+      -moustacheH / 2,
+      moustacheW,
+      moustacheH
+    );
+
+    ctx.restore();
+  }
+
+  // ── Boot ─────────────────────────────────────────────────────────────────────
+  moustacheImg.onload = startCamera;
+  moustacheImg.onerror = () => {
+    // If image fails, still start — we'll try to draw anyway
+    console.warn('Moustache image failed to load. Check assets/moustache.png');
+    startCamera();
+  };
+</script>
+</body>
+</html>
