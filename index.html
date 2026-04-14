@@ -224,7 +224,7 @@
     const noseRight = lmToCanvas(landmarks[RIGHT_NOSE], vW, vH);
 
     const cx = (philtrum.x + upperLip.x) / 2;
-    const cy = (philtrum.y + upperLip.y) / 2;
+    const cy = philtrum.y * 0.75 + upperLip.y * 0.25;
 
     const noseWidthPx = Math.hypot(
       noseRight.x - noseLeft.x,
