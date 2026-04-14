@@ -233,61 +233,28 @@
   }
 
   function drawMoustache(landmarks, W, H) {
-    // ── Anchor points ───────────────────────────────────────────────────────
     const noseBot  = lm(landmarks, NOSE_BOTTOM);
     const upperLip = lm(landmarks, UPPER_LIP);
-    const mouthL   = lm(landmarks, MOUTH_LEFT);
-    const mouthR   = lm(landmarks, MOUTH_RIGHT);
     const noseL    = lm(landmarks, LEFT_NOSE);
     const noseR    = lm(landmarks, RIGHT_NOSE);
 
-    // Center of the philtrum (between nose bottom and upper lip)
-    const cx = (noseBot.x + upperLip.x) / 2;
-    const cy = (noseBot.y + upperLip.y) / 2;
+    // Video is CSS-mirrored, so flip x: canvasX = (1 - landmark.x) * W
+    const cx = ((1 - noseBot.x) + (1 - upperLip.x)) / 2 * W;
+    const cy = (noseBot.y + upperLip.y) / 2 * H;
 
-    // Width: slightly wider than the distance between nose wings
-    const noseWidth = Math.hypot(
-      (noseR.x - noseL.x) * W,
-      (noseR.y - noseL.y) * H
-    );
-    const moustacheW = noseWidth * 2.4;
+    // Scale with face width
+    const noseWidthPx = Math.abs((1 - noseL.x) - (1 - noseR.x)) * W;
+    const moustacheW  = noseWidthPx * 2.4;
+    const imgAspect   = moustacheImg.naturalWidth / moustacheImg.naturalHeight;
+    const moustacheH  = moustacheW / imgAspect;
 
-    // Height proportional to width (preserve image aspect if possible)
-    const imgAspect = moustacheImg.naturalWidth && moustacheImg.naturalHeight
-      ? moustacheImg.naturalWidth / moustacheImg.naturalHeight
-      : 3.5;
-    const moustacheH = moustacheW / imgAspect;
-
-    // ── Head rotation ───────────────────────────────────────────────────────
-    // Roll angle: tilt of the mouth line
-    const dx = (mouthR.x - mouthL.x) * W;
-    const dy = (mouthR.y - mouthL.y) * H;
-    const roll = Math.atan2(dy, dx);
-
-    // ── Depth scale (z-axis perspective) ────────────────────────────────────
-    // MediaPipe z is relative; negative = closer. Scale near 1 for most faces.
-    const zScale = 1; // we rely on noseWidth adapting naturally
-
-    // ── Draw with canvas transform ──────────────────────────────────────────
-    ctx.save();
-
-    // Mirror compensation: video is CSS-mirrored, canvas must match
-    ctx.translate(W, 0);
-    ctx.scale(-1, 1);
-
-    ctx.translate(cx * W, cy * H);
-    ctx.rotate(roll);
-
-    ctx.globalAlpha = 0.95;
     ctx.drawImage(
       moustacheImg,
-      -moustacheW / 2,
-      -moustacheH / 2,
+      cx - moustacheW / 2,
+      cy - moustacheH / 2,
       moustacheW,
       moustacheH
     );
-
-    ctx.restore();
   }
 
   // ── Boot ─────────────────────────────────────────────────────────────────────
