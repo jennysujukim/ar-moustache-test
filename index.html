@@ -21,8 +21,8 @@
 
     #app {
       position: relative;
-      width: 640px;
-      height: 480px;
+      width: min(640px, 100vw);
+      aspect-ratio: 4 / 3;
       border-radius: 16px;
       overflow: hidden;
       box-shadow: 0 0 60px rgba(255, 255, 255, 0.08);
@@ -125,58 +125,61 @@
   const overlay = document.getElementById('overlay');
   const status  = document.getElementById('status');
 
-  // MediaPipe Face Mesh landmark indices
-  // Upper lip center area: 13 (upper lip top-center)
-  // Nose bottom: 2 (nose tip), 94 (nose bottom), 164 (under nose)
-  // Mouth corners: 61 (left), 291 (right)
-  // We'll place moustache between nose bottom (landmark 94) and upper lip (landmark 13)
-  // Width anchored on mouth corners 61 & 291
-
-  const NOSE_BOTTOM   = 94;   // bottom of the nose
-  const UPPER_LIP     = 13;   // top of upper lip
-  const MOUTH_LEFT    = 61;   // left mouth corner
-  const MOUTH_RIGHT   = 291;  // right mouth corner
-  const LEFT_NOSE     = 129;  // left ala of nose
-  const RIGHT_NOSE    = 358;  // right ala of nose
-  const PHILTRUM_L    = 92;
-  const PHILTRUM_R    = 322;
+  const NOSE_BOTTOM = 94;
+  const UPPER_LIP   = 13;
+  const LEFT_NOSE   = 129;
+  const RIGHT_NOSE  = 358;
 
   const moustacheImg = new Image();
   moustacheImg.src   = 'assets/moustache.png';
 
-  let modelReady  = false;
-  let faceVisible = false;
-  let lastFaces   = [];
+  let modelReady = false;
+  let processing = false;
 
-  // ── Face Mesh setup ──────────────────────────────────────────────────────────
+  // ── Face Mesh ────────────────────────────────────────────────────────────────
   const faceMesh = new FaceMesh({
     locateFile: (file) =>
       `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
   });
 
   faceMesh.setOptions({
-    maxNumFaces:        1,
-    refineLandmarks:    true,
-    minDetectionConfidence: 0.6,
-    minTrackingConfidence:  0.6,
+    maxNumFaces:            1,
+    refineLandmarks:        false, // lighter — works on mobile
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence:  0.5,
   });
 
+  // All drawing happens here — no separate render loop competing with this.
   faceMesh.onResults((results) => {
+    processing = false;
+
+    // Set canvas pixel dimensions once from the live video size
     if (!modelReady) {
       modelReady = true;
+      canvas.width  = video.videoWidth;
+      canvas.height = video.videoHeight;
       overlay.classList.add('hidden');
       status.textContent = 'Position your face in the frame';
       status.classList.add('ready');
     }
 
-    lastFaces = results.multiFaceLandmarks || [];
-    faceVisible = lastFaces.length > 0;
+    const W = canvas.width;
+    const H = canvas.height;
+    const faces = results.multiFaceLandmarks || [];
 
-    if (faceVisible) {
-      status.textContent = 'Face detected — enjoy your moustache!';
-    } else {
+    ctx.clearRect(0, 0, W, H);
+
+    if (faces.length === 0) {
       status.textContent = 'No face detected — move closer';
       status.classList.remove('ready');
+      return;
+    }
+
+    status.textContent = 'Face detected — enjoy your moustache!';
+    status.classList.add('ready');
+
+    if (moustacheImg.complete && moustacheImg.naturalWidth > 0) {
+      drawMoustache(faces[0], W, H);
     }
   });
 
@@ -184,25 +187,26 @@
   async function startCamera() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, facingMode: 'user' },
+        video: {
+          facingMode: 'user',
+          width:  { ideal: 640 },
+          height: { ideal: 480 },
+        },
         audio: false,
       });
       video.srcObject = stream;
       await video.play();
 
-      const camera = new Camera(video, {
-        onFrame: async () => {
-          canvas.width  = video.videoWidth  || 640;
-          canvas.height = video.videoHeight || 480;
-          await faceMesh.send({ image: video });
-        },
-        width: 640,
-        height: 480,
-      });
-      camera.start();
+      // Feed frames to MediaPipe — one at a time (wait for result before next send)
+      function sendFrame() {
+        if (!processing && video.readyState >= 2 && video.videoWidth > 0) {
+          processing = true;
+          faceMesh.send({ image: video }).catch(() => { processing = false; });
+        }
+        requestAnimationFrame(sendFrame);
+      }
+      requestAnimationFrame(sendFrame);
 
-      // Kick off render loop
-      requestAnimationFrame(renderLoop);
     } catch (err) {
       overlay.innerHTML = `
         <h2 style="color:#ff6b6b">Camera Access Denied</h2>
@@ -211,39 +215,18 @@
     }
   }
 
-  // ── Render loop ──────────────────────────────────────────────────────────────
-  function renderLoop() {
-    requestAnimationFrame(renderLoop);
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (!moustacheImg.complete || lastFaces.length === 0) return;
-
-    const W = canvas.width;
-    const H = canvas.height;
-
-    for (const landmarks of lastFaces) {
-      drawMoustache(landmarks, W, H);
-    }
-  }
-
-  function lm(landmarks, idx) {
-    const p = landmarks[idx];
-    return { x: p.x, y: p.y, z: p.z };
-  }
-
+  // ── Draw ─────────────────────────────────────────────────────────────────────
   function drawMoustache(landmarks, W, H) {
-    const noseBot  = lm(landmarks, NOSE_BOTTOM);
-    const upperLip = lm(landmarks, UPPER_LIP);
-    const noseL    = lm(landmarks, LEFT_NOSE);
-    const noseR    = lm(landmarks, RIGHT_NOSE);
+    const noseBot  = landmarks[NOSE_BOTTOM];
+    const upperLip = landmarks[UPPER_LIP];
+    const noseL    = landmarks[LEFT_NOSE];
+    const noseR    = landmarks[RIGHT_NOSE];
 
-    // Video is CSS-mirrored, so flip x: canvasX = (1 - landmark.x) * W
+    // Video is CSS-mirrored (scaleX -1); flip x so canvas aligns with display
     const cx = ((1 - noseBot.x) + (1 - upperLip.x)) / 2 * W;
     const cy = (noseBot.y + upperLip.y) / 2 * H;
 
-    // Scale with face width
-    const noseWidthPx = Math.abs((1 - noseL.x) - (1 - noseR.x)) * W;
+    const noseWidthPx = Math.abs(noseL.x - noseR.x) * W;
     const moustacheW  = noseWidthPx * 2.4;
     const imgAspect   = moustacheImg.naturalWidth / moustacheImg.naturalHeight;
     const moustacheH  = moustacheW / imgAspect;
@@ -258,12 +241,8 @@
   }
 
   // ── Boot ─────────────────────────────────────────────────────────────────────
-  moustacheImg.onload = startCamera;
-  moustacheImg.onerror = () => {
-    // If image fails, still start — we'll try to draw anyway
-    console.warn('Moustache image failed to load. Check assets/moustache.png');
-    startCamera();
-  };
+  moustacheImg.onload  = startCamera;
+  moustacheImg.onerror = () => startCamera();
 </script>
 </body>
 </html>
